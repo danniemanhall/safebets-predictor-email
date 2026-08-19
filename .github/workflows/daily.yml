@@ -1,0 +1,40 @@
+name: SafeBets daily slots
+
+on:
+  schedule:
+    # 05:30 UTC = 07:30 SAST. GitHub's scheduler runs late under load, often by
+    # 5-15 minutes and occasionally more, so treat this as "some time after
+    # 05:30" rather than a guarantee. The email stamps its own generation time,
+    # which is the number that matters -- the reference prices are as of that
+    # stamp, not as of the schedule.
+    - cron: "30 5 * * *"
+  workflow_dispatch:        # manual trigger, for testing without waiting a day
+
+concurrency:
+  group: safebets-daily
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send today's slots
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: python send_daily.py
