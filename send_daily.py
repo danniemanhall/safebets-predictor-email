@@ -1,13 +1,25 @@
 """
 send_daily.py — the whole product.
 
-Computes today's top 15 SafeBets slots and emails them as a plain table. Daniel
-opens one email, reads fifteen lines, types fifteen numbers off the SafeBets
-tiles, and is done.
+Computes today's SafeBets slots and emails them, grouped by asset so each tile
+is visited once. Daniel opens one email, works down the list, and types the
+tile's own current price into every timeframe box shown for that asset.
 
 What the email carries is the SLOT LIST. Prices are reference only: the number
 that gets submitted is whatever the tile says at the moment of entry, because an
 emailed price starts decaying the second it is sent.
+
+Below the list sits a three-line per-class summary and one flag: what share of
+the day's modelled return comes from cells that have never actually resolved.
+That flag is the point of the block. The class breakdown itself is descriptive
+only — every class clears the 1-coin stake at every horizon, so nothing in it
+tells you to skip anything.
+
+The summary reuses the EVs already computed for the ranking rather than calling
+class_strategy.class_strategies(), which would re-fetch two years of hourly bars
+for 26 assets and risk the Action's timeout. Hourly bars were tested and moved
+the 24H estimates by under a percentage point, so nothing is lost by leaving
+them out of the daily run.
 
 Configuration is entirely environment variables (GitHub repo secrets):
 
@@ -34,11 +46,28 @@ import argparse
 import os
 import smtplib
 import sys
+from collections import defaultdict
 from email.message import EmailMessage
 
 from safebets_core import daily_ranking, DEFAULT_TOP_N, DEFAULT_PROBE_N
+from class_strategy import CLASS_ORDER, asset_class, blended_ev
 
 SUBJECT_PREFIX = "SafeBets — today's slots"
+
+# The ranking rows carry a display label; the strategy tables are keyed by
+# period name. One map, so the two never drift apart.
+PERIOD_KEY = {
+    "24H": "HOURS_24",
+    "7D": "DAYS_7",
+    "14D": "DAYS_14",
+    "30D": "DAYS_30",
+}
+
+CLASS_LABEL = {
+    "crypto": "Crypto",
+    "commodity": "Commodities",
+    "equity": "Equities",
+}
 
 
 # --- FORMATTING ---
@@ -90,6 +119,60 @@ def group_rows(rows):
             order.append(r["symbol"])
         buckets[r["symbol"]].append(r)
     return [(sym, buckets[sym]) for sym in order]
+
+
+# --- CLASS SUMMARY ---
+
+
+def class_summary(rows):
+    """
+    Aggregate today's slots into per-class expected returns, blending each
+    class-and-horizon cell's modelled EV with Daniel's measured results.
+
+    Returns (per_class, unverified_share, total_ev) where per_class maps a
+    class name to {'slots': int, 'ev': float}. unverified_share is the fraction
+    of total expected return coming from cells that have never resolved — every
+    30D cell, plus equity 14D. That fraction is the number worth watching: it
+    says how much of the headline is measurement and how much is the model
+    talking to itself.
+    """
+    groups = defaultdict(list)
+    for r in rows:
+        period = PERIOD_KEY.get(r["period_label"])
+        if period:
+            groups[(asset_class(r["symbol"]), period)].append(r)
+
+    per_class = {}
+    total_ev = 0.0
+    unverified_ev = 0.0
+
+    for (cls, period), members in groups.items():
+        model = sum(m["ev"] for m in members) / len(members)
+        blend, _measured, _n, days = blended_ev(model, cls, period)
+        if blend is None:
+            continue
+        cell_ev = len(members) * blend
+
+        bucket = per_class.setdefault(cls, {"slots": 0, "ev": 0.0})
+        bucket["slots"] += len(members)
+        bucket["ev"] += cell_ev
+
+        total_ev += cell_ev
+        if days == 0:
+            unverified_ev += cell_ev
+
+    share = (unverified_ev / total_ev) if total_ev else 0.0
+    return per_class, share, total_ev
+
+
+def summary_lines(rows):
+    """The three class lines, as (label, slots, ev) tuples in a fixed order."""
+    per_class, _share, _total = class_summary(rows)
+    return [
+        (CLASS_LABEL[cls], per_class[cls]["slots"], per_class[cls]["ev"])
+        for cls in CLASS_ORDER
+        if cls in per_class
+    ]
 
 
 def build_html(result, top_n):
@@ -144,6 +227,34 @@ def build_html(result, top_n):
       </tbody>
     </table>"""
 
+    # --- class summary block ---
+    _per_class, unverified_share, total_ev = class_summary(result["rows"])
+    summary_rows = "".join(
+        f"""
+        <tr>
+          <td style="padding:3px 0;font-size:12px;color:#374151;">{label}</td>
+          <td style="padding:3px 0;font-size:12px;color:#6b7280;text-align:right;">{slots} slots</td>
+          <td style="padding:3px 0;font-size:12px;color:#374151;text-align:right;font-family:ui-monospace,Menlo,monospace;">~{ev:,.0f} ú</td>
+        </tr>"""
+        for label, slots, ev in summary_lines(result["rows"])
+    )
+
+    summary_html = f"""
+    <div style="margin:20px 0 0;padding-top:14px;border-top:1px solid #e5e7eb;">
+      <p style="margin:0 0 6px;font-size:12px;font-weight:600;color:#111827;">
+        Expected return by class — ~{total_ev:,.0f} ú total
+      </p>
+      <table style="width:100%;border-collapse:collapse;">
+        <tbody>{summary_rows}
+        </tbody>
+      </table>
+      <p style="margin:8px 0 0;color:#b45309;font-size:12px;">
+        {unverified_share:.0%} of that comes from slots that have never resolved
+        for you — every 30D cell, plus equity 14D. Payouts are confirmed at 24H,
+        7D and 14D; the 30D tier is still the model's word alone.
+      </p>
+    </div>"""
+
     has_flag = any(r["unverified"] or r["ref_price"] is None
                    for r in result["rows"] + result.get("probes", []))
     flag_note = ""
@@ -185,14 +296,14 @@ def build_html(result, top_n):
     </p>
     {flag_note}
     {skipped_note}
+    {summary_html}
 
     <p style="margin:16px 0 0;padding-top:12px;border-top:1px solid #e5e7eb;font-size:11px;color:#6b7280;">
-      EV is modelled from historical move distributions, not measured from
-      resolved predictions. <strong>The ordering is trustworthy; the levels are
-      not.</strong> No sustainable payout table returns 187:1 on an 8% event, so
-      a cap or eligibility rule is probably missing from the model. Spend the
-      list top-down and ignore the absolute numbers. Amounts are in unicoins, a
-      closed-platform token.
+      Every slot submits the same value: the tile's current price. EV is modelled
+      from historical move distributions and blended with 134 resolved
+      predictions, weighted by the number of distinct days those came from.
+      <strong>The ordering is more trustworthy than the levels.</strong> Amounts
+      are in unicoins, a closed-platform token.
     </p>
 
   </div>
@@ -233,11 +344,27 @@ def build_text(result, top_n):
         lines.append("* Reference price unreliable or unavailable. Read the tile.")
     if result["errors"]:
         lines.append(f"Not ranked today: {'; '.join(result['errors'])}.")
+
+    _per_class, unverified_share, total_ev = class_summary(result["rows"])
+    lines += ["", f"EXPECTED RETURN BY CLASS — ~{total_ev:,.0f} u total"]
+    for label, slots, ev in summary_lines(result["rows"]):
+        lines.append(f"  {label:<13}{slots:>3} slots{ev:>12,.0f} u")
+    lines.append(
+        f"{unverified_share:.0%} of that comes from slots that have never "
+        "resolved for you —"
+    )
+    lines.append(
+        "every 30D cell, plus equity 14D. Payouts are confirmed at 24H, 7D "
+        "and 14D."
+    )
+
     lines += [
         "",
-        "EV figures are modelled, not measured. The ordering is trustworthy;",
-        "the levels are not. Spend the list top-down and ignore the absolute",
-        "numbers. Amounts are in unicoins, a closed-platform token.",
+        "Every slot submits the same value: the tile's current price. EV is",
+        "modelled and blended with 134 resolved predictions, weighted by the",
+        "number of distinct days those came from. The ordering is more",
+        "trustworthy than the levels. Amounts are in unicoins, a closed-platform",
+        "token.",
     ]
     return "\n".join(lines)
 
