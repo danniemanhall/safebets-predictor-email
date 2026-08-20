@@ -85,7 +85,7 @@ def run_bot(group_name):
         try:
             # 1. Trigger Magic Link
             print("🔑 Navigating to login page...")
-            page.goto("https://safebets.app", wait_until="networkidle")
+            page.goto("https://app.safebets.world", wait_until="networkidle")
             
             # Input email and request link
             page.fill('input[type="email"], input[name="email"]', email_address)
