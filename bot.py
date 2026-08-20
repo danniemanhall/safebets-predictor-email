@@ -1,11 +1,6 @@
 import os
 import sys
-import time
 import argparse
-import imaplib
-import email
-import re
-from email.header import decode_header
 from playwright.sync_api import sync_playwright
 
 GROUPS = {
@@ -14,95 +9,32 @@ GROUPS = {
     "crypto": ["BTC", "ETH", "SOL", "DOGE", "AVAX", "LINK", "HYPE"]
 }
 
-def get_magic_link_from_gmail(user_email, app_password):
-    """Connects to Gmail via IMAP to wait for and extract the SafeBets magic link."""
-    print("⏳ Connecting to Gmail to intercept Magic Link...")
-    
-    try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        mail.login(user_email, app_password)
-        mail.select("inbox")
-    except Exception as e:
-        print(f"❌ Gmail Login Failed. Check your App Password: {e}")
-        return None
-
-    # Poll inbox for up to 60 seconds
-    for _ in range(12):
-        time.sleep(5)
-        print("🔄 Checking inbox for new SafeBets email...")
-        
-        status, messages = mail.search(None, '(UNSEEN)')
-        if status == 'OK' and messages[0]:
-            mail_ids = messages[0].split()
-            
-            for i in reversed(mail_ids):
-                status, msg_data = mail.fetch(i, '(RFC822)')
-                for response_part in msg_data:
-                    if isinstance(response_part, tuple):
-                        msg = email.message_from_bytes(response_part[1])
-                        
-                        body = ""
-                        if msg.is_multipart():
-                            for part in msg.walk():
-                                if part.get_content_type() == "text/plain":
-                                    body = part.get_payload(decode=True).decode(errors="ignore")
-                                    break
-                        else:
-                            body = msg.get_payload(decode=True).decode(errors="ignore")
-                        
-                        urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', body)
-                        for url in urls:
-                            if "safebets.world" in url.lower() or "safebets.app" in url.lower():
-                                print("✅ Intercepted Magic Link!")
-                                return url
-                                
-    print("❌ Timed out waiting for SafeBets email.")
-    return None
-
 def run_bot(group_name):
-    email_address = os.environ.get("SAFEBETS_EMAIL")
-    app_password = os.environ.get("GMAIL_APP_PASSWORD")
-
-    if not email_address or not app_password:
-        print("❌ Error: SAFEBETS_EMAIL or GMAIL_APP_PASSWORD missing from GitHub Secrets.")
+    session_data = os.environ.get("SAFEBETS_SESSION")
+    if not session_data:
+        print("❌ Error: SAFEBETS_SESSION missing from GitHub Secrets.")
         sys.exit(1)
+
+    # Save session state to temporary file for Playwright
+    with open("temp_state.json", "w") as f:
+        f.write(session_data)
 
     print(f"🚀 Starting Autonomous SafeBets Bot [Group: {group_name}]")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
+            storage_state="temp_state.json",
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             ignore_https_errors=True
         )
         page = context.new_page()
 
         try:
-           # 1. Trigger Magic Link
-            print("🔑 Navigating directly to login page...")
-            page.goto("https://app.safebets.world/login", wait_until="domcontentloaded", timeout=60000)
-            
-            # Wait for email input box to appear
-            page.wait_for_selector('input[type="email"], input[name="email"]', timeout=15000)
-            page.fill('input[type="email"], input[name="email"]', email_address)
-            
-            # Click the Send magic link button
-            page.click('button[type="submit"], button:has-text("Send magic link")')
-            print("📧 Magic link requested. Waiting for email...")
+            print("🔑 Bypassing login and going straight to dashboard...")
+            page.goto("https://app.safebets.world", wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(5000)
 
-            # 2. Extract Link from Gmail
-            magic_link = get_magic_link_from_gmail(email_address, app_password)
-            
-            if not magic_link:
-                browser.close()
-                sys.exit(1)
-
-            # 3. Log In via Magic Link
-            print("🔗 Navigating to Magic Link URL...")
-            page.goto(magic_link, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(8000) # Give dashboard extra time to render fully
-
-            # 4. Main Betting Loop
             assets_to_process = GROUPS.get(group_name, [])
             print(f"📋 Processing {len(assets_to_process)} assets in {group_name}...")
 
@@ -112,18 +44,15 @@ def run_bot(group_name):
                     page.click(f'text="{asset}"') 
                     page.wait_for_timeout(2000)
 
-                    # Extract current Spot Price from the UI tile
                     spot_price_element = page.locator('.current-price, .spot-price, [data-testid="spot-price"]').first
                     spot_price_text = spot_price_element.inner_text().replace('$', '').replace(',', '').strip()
                     spot_price = float(spot_price_text)
                     print(f"🎯 Extracted Live Spot Price for {asset}: ${spot_price:,.2f}")
 
-                    # Fill inputs for 1D, 7D, 14D, 30D
                     prediction_inputs = page.locator('input[placeholder*="Target"], input[type="number"]').all()
                     for inp in prediction_inputs:
                         inp.fill(str(spot_price))
 
-                    # Click Submit
                     submit_btn = page.locator('button:has-text("Submit"), button:has-text("Place Bet")').first
                     if submit_btn.is_visible():
                         submit_btn.click()
@@ -138,7 +67,6 @@ def run_bot(group_name):
 
         except Exception as e:
             print(f"❌ Automation Error: {e}")
-            page.screenshot(path="error_snapshot.png", full_page=True)
         finally:
             browser.close()
 

@@ -24,6 +24,6 @@ jobs:
 
       - name: Execute Commodities Bot
         env:
-          SAFEBETS_EMAIL: ${{ secrets.SAFEBETS_EMAIL }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SAFEBETS_SESSION: ${{ secrets.SAFEBETS_SESSION }}
+          
         run: python bot.py --group commodities
