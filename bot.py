@@ -58,7 +58,7 @@ def get_magic_link_from_gmail(user_email, app_password):
                     # Extract URL from the email body
                     urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', body)
                     for url in urls:
-                        if "safebets.app" in url.lower():
+                        if "safebets.world" in url.lower():
                             print("✅ Intercepted Magic Link!")
                             return url
                             
