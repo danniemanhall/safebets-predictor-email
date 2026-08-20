@@ -46,62 +46,73 @@ def run_bot(group_name):
             page.goto("https://app.safebets.world/dashboard", wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(5000)
 
+            # --- DIAGNOSTIC CHECK ---
+            current_url = page.url
+            page_title = page.title()
+            print(f"🌍 Current URL: {current_url}")
+            print(f"📄 Page Title: {page_title}")
+            
+            if "login" in current_url.lower():
+                print("❌ REDIRECTED TO LOGIN! SafeBets rejected the session cookie (likely due to IP change).")
+                sys.exit(1)
+            elif "moment" in page_title.lower() or "cloudflare" in page_title.lower():
+                print("🛡️ BLOCKED BY CLOUDFLARE! Bot is stuck on a captcha screen.")
+                sys.exit(1)
+            # -------------------------
+
             group_info = GROUPS.get(group_name, {})
             tabs = group_info.get("tabs", [])
             assets = group_info.get("assets", [])
 
             for tab in tabs:
                 try:
-                    tab_btn = page.locator(f'button:has-text("{tab}")').first
+                    tab_btn = page.locator(f'text="{tab}"').first
                     if tab_btn.is_visible(timeout=3000):
-                        tab_btn.click()
+                        tab_btn.click(timeout=3000)
                         print(f"📂 Clicked Category Tab: {tab}")
                         page.wait_for_timeout(2000)
                 except Exception as e:
-                    print(f"⚠️ Could not click tab {tab}: {e}")
+                    pass
 
-                for asset in assets:
-                    try:
-                        # Find asset tile
-                        asset_tile = page.locator(f'text="{asset}"').first
-                        if not asset_tile.is_visible(timeout=2000):
-                            continue
-                        
-                        asset_tile.click()
-                        print(f"\n📈 Selected Asset: {asset}")
-                        page.wait_for_timeout(1500)
+            for asset in assets:
+                try:
+                    asset_tile = page.locator(f'text="{asset}"').first
+                    if not asset_tile.is_visible(timeout=3000):
+                        print(f"⚠️ {asset} tile not found on screen.")
+                        continue
+                    
+                    asset_tile.click(timeout=3000)
+                    print(f"\n📈 Selected Asset: {asset}")
+                    page.wait_for_timeout(1500)
 
-                        # Extract spot price from 'Current price' section
-                        current_price_block = page.locator('text="Current price"').locator('..').inner_text()
-                        price_match = re.search(r'([\d,]+\.?\d*)', current_price_block)
-                        if not price_match:
-                            print(f"⚠️ Could not parse spot price for {asset}")
-                            continue
-                        
-                        spot_price = float(price_match.group(1).replace(',', ''))
-                        print(f"🎯 Extracted Live Spot Price for {asset}: ${spot_price:,.2f}")
+                    current_price_block = page.locator('text="Current price"').locator('..').inner_text(timeout=3000)
+                    price_match = re.search(r'([\d,]+\.?\d*)', current_price_block)
+                    if not price_match:
+                        continue
+                    
+                    spot_price = float(price_match.group(1).replace(',', ''))
+                    print(f"🎯 Extracted Live Spot Price for {asset}: ${spot_price:,.2f}")
 
-                        # Loop through all 4 timeframes
-                        for tf in TIMEFRAMES:
-                            try:
-                                tf_btn = page.locator(f'button:has-text("{tf}")').first
-                                if tf_btn.is_visible():
-                                    tf_btn.click()
-                                    page.wait_for_timeout(500)
+                    for tf in TIMEFRAMES:
+                        try:
+                            tf_btn = page.locator(f'text="{tf}"').first
+                            if tf_btn.is_visible(timeout=2000):
+                                tf_btn.click(timeout=2000)
+                                page.wait_for_timeout(500)
 
-                                input_field = page.locator('input[placeholder="0.00"]').first
-                                input_field.fill(str(spot_price))
+                            input_field = page.locator('input[placeholder*="0.00"]').first
+                            input_field.fill(str(spot_price), timeout=2000)
 
-                                submit_btn = page.locator('button:has-text("Submit Prediction")').first
-                                if submit_btn.is_visible():
-                                    submit_btn.click()
-                                    print(f"  ✅ Submitted {tf} prediction (${spot_price:,.2f})")
-                                    page.wait_for_timeout(1000)
-                            except Exception as tf_err:
-                                print(f"  ⚠️ Error submitting {tf} for {asset}: {tf_err}")
+                            submit_btn = page.locator('button:has-text("Submit Prediction")').first
+                            if submit_btn.is_visible(timeout=2000):
+                                submit_btn.click(timeout=2000)
+                                print(f"  ✅ Submitted {tf} prediction (${spot_price:,.2f})")
+                                page.wait_for_timeout(1000)
+                        except Exception as tf_err:
+                            print(f"  ⚠️ Error submitting {tf}: {tf_err}")
 
-                    except Exception as e:
-                        print(f"⚠️ Could not process asset {asset}: {e}")
+                except Exception as e:
+                    print(f"⚠️ Could not process asset {asset}: {e}")
 
             print(f"\n🎉 Completed all predictions for group: {group_name}")
 
