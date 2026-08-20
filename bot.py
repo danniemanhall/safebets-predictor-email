@@ -31,7 +31,6 @@ def get_magic_link_from_gmail(user_email, app_password):
         time.sleep(5)
         print("🔄 Checking inbox for new SafeBets email...")
         
-        # Search for recent unread emails
         status, messages = mail.search(None, '(UNSEEN)')
         if status == 'OK' and messages[0]:
             mail_ids = messages[0].split()
@@ -51,10 +50,8 @@ def get_magic_link_from_gmail(user_email, app_password):
                         else:
                             body = msg.get_payload(decode=True).decode(errors="ignore")
                         
-                        # Extract URL from the email body
                         urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', body)
                         for url in urls:
-                            # Added safebets.app as a fallback just in case the email link redirects
                             if "safebets.world" in url.lower() or "safebets.app" in url.lower():
                                 print("✅ Intercepted Magic Link!")
                                 return url
@@ -74,7 +71,6 @@ def run_bot(group_name):
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        # THIS IS THE CRITICAL FIX: ignore_https_errors=True
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             ignore_https_errors=True
@@ -82,14 +78,17 @@ def run_bot(group_name):
         page = context.new_page()
 
         try:
-            # 1. Trigger Magic Link
+            # 1. Trigger Magic Link (Using domcontentloaded to prevent timeouts)
             print("🔑 Navigating to login page...")
-            page.goto("https://app.safebets.world", wait_until="networkidle")
+            page.goto("https://app.safebets.world", wait_until="domcontentloaded", timeout=60000)
             
-            # Input email and request link
+            # Wait for email input box to appear
+            page.wait_for_selector('input[type="email"], input[name="email"]', timeout=15000)
             page.fill('input[type="email"], input[name="email"]', email_address)
+            
+            # Click login / send link button
             page.click('button[type="submit"], button:has-text("Log In"), button:has-text("Send Link")')
-            print("📧 Magic link requested.")
+            print("📧 Magic link requested. Waiting for email...")
 
             # 2. Extract Link from Gmail
             magic_link = get_magic_link_from_gmail(email_address, app_password)
@@ -100,8 +99,8 @@ def run_bot(group_name):
 
             # 3. Log In via Magic Link
             print("🔗 Navigating to Magic Link URL...")
-            page.goto(magic_link, wait_until="networkidle")
-            page.wait_for_timeout(5000)
+            page.goto(magic_link, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(8000) # Give dashboard extra time to render fully
 
             # 4. Main Betting Loop
             assets_to_process = GROUPS.get(group_name, [])
@@ -139,6 +138,7 @@ def run_bot(group_name):
 
         except Exception as e:
             print(f"❌ Automation Error: {e}")
+            page.screenshot(path="error_snapshot.png", full_page=True)
         finally:
             browser.close()
 
