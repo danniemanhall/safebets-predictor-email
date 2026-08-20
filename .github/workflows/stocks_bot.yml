@@ -20,7 +20,7 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install -r requirements.txt
-          playwright install chromium
+          patchright install chromium
 
       - name: Execute Stocks Bot
         env:
