@@ -78,16 +78,16 @@ def run_bot(group_name):
         page = context.new_page()
 
         try:
-            # 1. Trigger Magic Link (Using domcontentloaded to prevent timeouts)
-            print("🔑 Navigating to login page...")
-            page.goto("https://app.safebets.world", wait_until="domcontentloaded", timeout=60000)
+           # 1. Trigger Magic Link
+            print("🔑 Navigating directly to login page...")
+            page.goto("https://app.safebets.world/login", wait_until="domcontentloaded", timeout=60000)
             
             # Wait for email input box to appear
             page.wait_for_selector('input[type="email"], input[name="email"]', timeout=15000)
             page.fill('input[type="email"], input[name="email"]', email_address)
             
-            # Click login / send link button
-            page.click('button[type="submit"], button:has-text("Log In"), button:has-text("Send Link")')
+            # Click the Send magic link button
+            page.click('button[type="submit"], button:has-text("Send magic link")')
             print("📧 Magic link requested. Waiting for email...")
 
             # 2. Extract Link from Gmail
