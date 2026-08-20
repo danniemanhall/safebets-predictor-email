@@ -33,35 +33,32 @@ def get_magic_link_from_gmail(user_email, app_password):
         
         # Search for recent unread emails
         status, messages = mail.search(None, '(UNSEEN)')
-        mail_ids = messages[0].split()
-        
-        for i in reversed(mail_ids):
-            status, msg_data = mail.fetch(i, '(RFC822)')
-            for response_part in msg_data:
-                if isinstance(response_part, tuple):
-                    msg = email.message_from_bytes(response_part[1])
-                    
-                    # Ensure it's from SafeBets (or just grab the body if recent)
-                    subject, encoding = decode_header(msg["Subject"])[0]
-                    if isinstance(subject, bytes):
-                        subject = subject.decode(encoding if encoding else "utf-8")
+        if status == 'OK' and messages[0]:
+            mail_ids = messages[0].split()
+            
+            for i in reversed(mail_ids):
+                status, msg_data = mail.fetch(i, '(RFC822)')
+                for response_part in msg_data:
+                    if isinstance(response_part, tuple):
+                        msg = email.message_from_bytes(response_part[1])
                         
-                    body = ""
-                    if msg.is_multipart():
-                        for part in msg.walk():
-                            if part.get_content_type() == "text/plain":
-                                body = part.get_payload(decode=True).decode()
-                                break
-                    else:
-                        body = msg.get_payload(decode=True).decode()
-                    
-                    # Extract URL from the email body
-                    urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', body)
-                    for url in urls:
-                        if "safebets.world" in url.lower():
-                            print("✅ Intercepted Magic Link!")
-                            return url
-                            
+                        body = ""
+                        if msg.is_multipart():
+                            for part in msg.walk():
+                                if part.get_content_type() == "text/plain":
+                                    body = part.get_payload(decode=True).decode(errors="ignore")
+                                    break
+                        else:
+                            body = msg.get_payload(decode=True).decode(errors="ignore")
+                        
+                        # Extract URL from the email body
+                        urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', body)
+                        for url in urls:
+                            # Added safebets.app as a fallback just in case the email link redirects
+                            if "safebets.world" in url.lower() or "safebets.app" in url.lower():
+                                print("✅ Intercepted Magic Link!")
+                                return url
+                                
     print("❌ Timed out waiting for SafeBets email.")
     return None
 
@@ -77,8 +74,10 @@ def run_bot(group_name):
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
+        # THIS IS THE CRITICAL FIX: ignore_https_errors=True
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            ignore_https_errors=True
         )
         page = context.new_page()
 
