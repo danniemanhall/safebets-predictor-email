@@ -25,5 +25,5 @@ jobs:
       - name: Execute Crypto Bot
         env:
           SAFEBETS_EMAIL: ${{ secrets.SAFEBETS_EMAIL }}
-          SAFEBETS_PASSWORD: ${{ secrets.SAFEBETS_PASSWORD }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python bot.py --group crypto
