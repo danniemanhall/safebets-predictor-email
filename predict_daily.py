@@ -44,13 +44,14 @@ import pandas as pd
 from bakeoff import fetch
 from class_strategy import asset_class
 from news_bakeoff import (BUCKETS, HORIZONS, MIN_TRAIN, NEWS_COLS, TRAIN_WINDOW,
-                          load_news, make_ensemble, make_linear, news_features,
-                          prepare)
+                          download_news, load_news, make_ensemble, make_linear,
+                          news_age_days, news_features, prepare)
 from safebets_core import asset_map, get_live_price
 from send_daily import load_config, send
 
 VERDICT_FILE = 'backtest_result.json'
 DAILY_TREES = 150
+MAX_NEWS_AGE = 7         # days; older than this and a model is not trusted
 
 # Same order as the SafeBets tabs, so the email can be worked top to bottom.
 TABS = [
@@ -124,10 +125,12 @@ def model_view(sb: str, ticker: str, use: str):
     Returns ({period: predicted move as a fraction}, news bucket today).
     Either part is None/empty when the data for this asset is missing.
     """
-    news = load_news(sb, refresh=True)
+    news = load_news(sb)
+    age = news_age_days(sb)
     df = fetch(ticker)
-    if news is None or df is None or len(news) < 400:
-        return {}, None
+    if (news is None or df is None or len(news) < 400
+            or age is None or age > MAX_NEWS_AGE):
+        return {}, None             # no fresh news: this asset uses the tile price
 
     lag = 0 if asset_class(sb) == 'crypto' else 1
     feats, close, nf = prepare(df, news_features(news, lag))
@@ -165,6 +168,9 @@ def build_plan(verdict: dict):
     use = verdict['use']
     skip_rules = {(s['cls'], s['period'], s['bucket']) for s in verdict['skip']}
     need_model = use != 'tile' or bool(skip_rules)
+    if need_model:
+        download_news([sb for _, symbols in TABS for sb in symbols],
+                      budget_min=15, max_age_days=1)
 
     plan = []
     for tab, symbols in TABS:
@@ -226,7 +232,8 @@ def test_summary(verdict):
     for model in verdict['models'].values():
         parts.append(f"{model['label'].lower()} {model['per_coin']:.2f}")
     return (f"Latest test ({when}), unicoins returned per coin over "
-            f"{verdict['predictions']:,} predictions: {', '.join(parts)}.")
+            f"{verdict['predictions']:,} predictions on "
+            f"{len(verdict.get('assets') or [])} of 26 assets: {', '.join(parts)}.")
 
 
 def headline(verdict, plan):

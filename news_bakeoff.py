@@ -7,7 +7,8 @@ the tile price. This adds the piece that was never tested: news.
 NEWS SOURCE
   GDELT, a free archive of world news coverage. For each asset it gives, for
   every day since 1 January 2017, how many articles mentioned it and the
-  average tone of that coverage. Downloaded once and saved in news_cache/.
+  average tone of that coverage. Saved in news_cache/ and topped up from
+  there, so a day when the archive refuses requests does not stop the test.
 
 TWO QUESTIONS, ANSWERED SEPARATELY
   1. SKIP TEST (minutes, no model). On days when an asset is unusually heavily
@@ -46,6 +47,8 @@ USAGE
   python news_bakeoff.py --synthetic noise  # control: news is pure noise
   python news_bakeoff.py --synthetic signal # control: news truly predicts price
   python news_bakeoff.py --json backtest_result.json   # also save the verdict
+  python news_bakeoff.py --download-news --refresh-news   # only top up the news
+  python news_bakeoff.py --offline          # test on saved news, download nothing
 
 The saved verdict is what predict_daily.py reads to decide how to produce the
 day's numbers: the tile price, unless a model wins by the rule below. If a
@@ -140,62 +143,78 @@ BUCKETS = [('quiet', 0.0, 0.8), ('normal', 0.8, 1.5), ('heavy', 1.5, np.inf)]
 
 GDELT_URL = 'https://api.gdeltproject.org/api/v2/doc/doc'
 CACHE_DIR = 'news_cache'
-MIN_GAP = 8.0            # seconds between requests; the archive asks for 5+
+MIN_GAP = 10.0           # seconds between requests; the archive asks for 5+
+COOL_DOWN = 45.0         # extra wait after the archive says to slow down
 _last_call = [0.0]
 
 
+class RateLimited(RuntimeError):
+    """The archive asked us to slow down, or the connection dropped."""
+
+
 def _gdelt(query: str, mode: str):
-    """One timeline (daily since 2017) from GDELT, with polite retries."""
+    """
+    One timeline (daily since 2017) from GDELT, in a single polite attempt.
+    Raises RateLimited when it is worth trying again later, RuntimeError when
+    the search itself is the problem.
+    """
     params = {
         'query': query, 'mode': mode, 'format': 'json',
         'startdatetime': '20170101000000',
         'enddatetime': datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S'),
     }
     url = GDELT_URL + '?' + urllib.parse.urlencode(params)
-    reason = 'no answer'
-    for attempt in range(1, 7):
-        wait = MIN_GAP - (time.time() - _last_call[0])
-        if wait > 0:
-            time.sleep(wait)
+    wait = MIN_GAP - (time.time() - _last_call[0])
+    if wait > 0:
+        time.sleep(wait)
+    try:
+        req = urllib.request.Request(
+            url, headers={'User-Agent': 'Mozilla/5.0 (news_bakeoff)'})
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            text = resp.read().decode('utf-8-sig', errors='replace')
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            raise RateLimited('HTTP 429')
+        raise RuntimeError(f'HTTP {exc.code}')
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        raise RateLimited(f'network problem ({type(exc).__name__})')
+    finally:
         _last_call[0] = time.time()
-        text = ''
-        try:
-            req = urllib.request.Request(
-                url, headers={'User-Agent': 'Mozilla/5.0 (news_bakeoff)'})
-            with urllib.request.urlopen(req, timeout=90) as resp:
-                text = resp.read().decode('utf-8-sig', errors='replace')
-            data = json.loads(text, strict=False)
-            series = (data.get('timeline') or [{}])[0].get('data') or []
-            if series:
-                return series
-            raise RuntimeError('the archive returned no rows for this search')
-        except urllib.error.HTTPError as exc:
-            reason = f'HTTP {exc.code}'
-            if exc.code != 429:
-                raise RuntimeError(reason)
-        except json.JSONDecodeError:
-            reason = text.strip()[:140] or 'unreadable answer'
-            if 'limit requests' not in text:
-                raise RuntimeError(reason)
-        except (urllib.error.URLError, TimeoutError) as exc:
-            reason = f'network problem ({type(exc).__name__})'
-        time.sleep(20 * attempt)          # asked to slow down, or a blip
-    raise RuntimeError(reason)
+
+    if 'limit requests' in text[:300]:
+        raise RateLimited('asked to slow down')
+    try:
+        data = json.loads(text, strict=False)
+    except json.JSONDecodeError:
+        raise RuntimeError(text.strip()[:140] or 'unreadable answer')
+    series = (data.get('timeline') or [{}])[0].get('data') or []
+    if not series:
+        raise RuntimeError('the archive returned no rows for this search')
+    return series
 
 
-def load_news(sym: str, refresh: bool = False) -> pd.DataFrame | None:
-    """Daily article count, total articles and tone for one asset."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    path = os.path.join(CACHE_DIR, f'{sym}.csv')
-    if os.path.exists(path) and not refresh:
-        return pd.read_csv(path, index_col=0, parse_dates=True)
+def cache_path(sym: str) -> str:
+    return os.path.join(CACHE_DIR, f'{sym}.csv')
 
-    query = NEWS_QUERY.get(sym)
-    if not query:
+
+def load_news(sym: str) -> pd.DataFrame | None:
+    """Saved daily article count, total articles and tone for one asset."""
+    path = cache_path(sym)
+    if not os.path.exists(path):
         return None
-    vol = _gdelt(query, 'timelinevolraw')
-    tone = _gdelt(query, 'timelinetone')
+    return pd.read_csv(path, index_col=0, parse_dates=True)
 
+
+def news_age_days(sym: str):
+    """Days since the newest saved news for this asset, or None if none saved."""
+    news = load_news(sym)
+    if news is None or news.empty:
+        return None
+    today = pd.Timestamp(datetime.now(timezone.utc).date())
+    return int((today - news.index.max()).days)
+
+
+def _save_news(sym: str, vol, tone) -> pd.DataFrame:
     def frame(rows, fields):
         idx = pd.to_datetime([r['date'] for r in rows],
                              format='%Y%m%dT%H%M%SZ').normalize()
@@ -205,8 +224,63 @@ def load_news(sym: str, refresh: bool = False) -> pd.DataFrame | None:
     news = frame(vol, {'count': 'value', 'norm': 'norm'}).join(
         frame(tone, {'tone': 'value'}), how='outer')
     news = news[~news.index.duplicated(keep='last')].sort_index()
-    news.to_csv(path)
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    news.to_csv(cache_path(sym))
     return news
+
+
+def download_news(symbols, budget_min: float = 40.0, max_age_days=None):
+    """
+    Top up news_cache/. With max_age_days=None only assets with no saved news
+    are fetched; with a number, anything older than that is refreshed too.
+
+    The archive limits how often one address may ask, and on shared servers
+    (GitHub's) that limit is often already used up by someone else. So this
+    works in rounds: one attempt per asset, a pause after every refusal, then
+    back round to the ones that were refused, until everything is in or the
+    time budget runs out. Whatever was saved earlier stays in place, so a bad
+    day costs freshness, not the whole test.
+
+    Returns the assets that could not be fetched this time.
+    """
+    def wanted(sym):
+        if sym not in NEWS_QUERY:
+            return False
+        age = news_age_days(sym)
+        return age is None or (max_age_days is not None and age > max_age_days)
+
+    pending = [s for s in symbols if wanted(s)]
+    if not pending:
+        return []
+    print(f'Downloading news for {len(pending)} assets '
+          f'(up to {budget_min:.0f} minutes)...')
+    deadline = time.time() + budget_min * 60
+    partial, round_no = {}, 0
+    while pending and time.time() < deadline:
+        round_no += 1
+        still = []
+        for sym in pending:
+            if time.time() >= deadline:
+                still.append(sym)
+                continue
+            got = partial.setdefault(sym, {})
+            try:
+                for mode in ('timelinevolraw', 'timelinetone'):
+                    if mode not in got:
+                        got[mode] = _gdelt(NEWS_QUERY[sym], mode)
+                news = _save_news(sym, got['timelinevolraw'], got['timelinetone'])
+                print(f'  {sym:8} saved {len(news)} days of news')
+            except RateLimited:
+                still.append(sym)
+                time.sleep(max(0.0, min(COOL_DOWN, deadline - time.time())))
+            except RuntimeError as exc:
+                print(f'  {sym:8} news search failed: {exc}')
+        pending = still
+        if pending:
+            print(f'  round {round_no}: {len(pending)} still waiting on the archive')
+    if pending:
+        print(f"  not downloaded this time: {', '.join(pending)}")
+    return pending
 
 
 def news_features(news: pd.DataFrame, lag: int) -> pd.DataFrame:
@@ -538,7 +612,13 @@ def main():
     ap.add_argument('--synthetic', choices=['noise', 'signal'],
                     help='no downloads; made-up data with a known answer')
     ap.add_argument('--refresh-news', action='store_true',
-                    help='download the news again instead of using news_cache/')
+                    help='also refresh saved news that is more than 2 days old')
+    ap.add_argument('--download-news', action='store_true',
+                    help='download news into news_cache/ and stop')
+    ap.add_argument('--offline', action='store_true',
+                    help='use the news already in news_cache/, download nothing')
+    ap.add_argument('--news-minutes', type=float, default=40.0,
+                    help='time budget for downloading news (default 40)')
     ap.add_argument('--trees', type=int, help='trees per model (default 300, quick 150)')
     ap.add_argument('--test-days', type=int, default=TEST_DAYS)
     ap.add_argument('--refit', type=int, default=REFIT_EVERY)
@@ -566,24 +646,20 @@ def main():
 
     # ---- gather prices and news --------------------------------------
     ready = []
-    if not args.synthetic:
-        need = [sb for sb, _ in pairs
-                if args.refresh_news
-                or not os.path.exists(os.path.join(CACHE_DIR, f'{sb}.csv'))]
-        if need:
-            print(f'Downloading news for {len(need)} assets '
-                  f'(about {len(need) * 2 * MIN_GAP / 60:.0f} minutes, once only)...')
+    if not args.synthetic and not args.offline:
+        download_news([sb for sb, _ in pairs], budget_min=args.news_minutes,
+                      max_age_days=2 if args.refresh_news else None)
+    if args.download_news:
+        saved = [sb for sb, _ in pairs if load_news(sb) is not None]
+        print(f'News saved for {len(saved)} of {len(pairs)} assets.')
+        return
     for k, (sb, ticker) in enumerate(pairs, 1):
         if args.synthetic:
             df, news = synthetic_pair(seed=k, signal=(args.synthetic == 'signal'))
         else:
-            try:
-                news = load_news(sb, refresh=args.refresh_news)
-            except RuntimeError as exc:
-                print(f'  {sb:8} news download failed: {exc}')
-                continue
+            news = load_news(sb)
             if news is None or len(news) < 400:
-                print(f'  {sb:8} too little news history — skipped')
+                print(f'  {sb:8} no saved news — skipped')
                 continue
             df = fetch(ticker)
             if df is None:
@@ -596,8 +672,8 @@ def main():
         ready.append((sb, feats, close, nf))
 
     if not ready:
-        raise SystemExit('Nothing to test. If the news download failed for every '
-                         'asset, wait ten minutes and run the same command again.')
+        raise SystemExit('Nothing to test: no asset has both saved news and price '
+                         'history. Run with --download-news first.')
 
     # ---- test 1 -------------------------------------------------------
     records = []
@@ -607,6 +683,7 @@ def main():
         'generated_at': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
         'data': 'made-up' if args.synthetic else 'live',
         'assets': [sb for sb, *_ in ready],
+        'assets_asked': len(pairs),
         'settings': {'trees': args.trees, 'test_days': args.test_days,
                      'refit': args.refit},
         'skip': print_skip_table(records),
