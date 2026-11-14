@@ -8,10 +8,11 @@ name: News backtest
 # Actions tab. Reads public price and news data only; it never contacts
 # SafeBets.
 #
-# The news archive limits how often one address may ask, and GitHub's servers
-# share addresses, so some downloads are refused on any given run. Whatever
-# does arrive is saved in news_cache/ and reused, so coverage builds up over
-# runs. Starting this with scope "news" only tops up that saved news.
+# The news archive refuses most requests from GitHub's shared servers, so
+# news is collected a little at a time by the "News top-up" workflow and
+# saved in news_cache/. This workflow tops it up once more, then tests on
+# whatever is saved. With too few assets it leaves the existing verdict alone.
+# Starting it with scope "news" only tops up the saved news.
 
 on:
   schedule:
@@ -28,7 +29,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: news-backtest
+  group: safebets-news
   cancel-in-progress: false
 
 jobs:
@@ -50,9 +51,9 @@ jobs:
       - name: Download news
         run: |
           if [ "${{ github.event.inputs.scope }}" = "quick" ]; then
-            python news_bakeoff.py --quick --download-news --refresh-news --news-minutes 45
+            python news_bakeoff.py --quick --download-news --max-age 7 --news-minutes 45
           else
-            python news_bakeoff.py --download-news --refresh-news --news-minutes 45
+            python news_bakeoff.py --download-news --max-age 7 --news-minutes 45
           fi
 
       - name: Save the news to the repository
@@ -72,9 +73,9 @@ jobs:
         if: github.event.inputs.scope != 'news'
         run: |
           if [ "${{ github.event.inputs.scope }}" = "quick" ]; then
-            python news_bakeoff.py --quick --offline --json backtest_result.json
+            python news_bakeoff.py --quick --offline --min-assets 6 --json backtest_result.json
           else
-            python news_bakeoff.py --offline --json backtest_result.json
+            python news_bakeoff.py --offline --min-assets 15 --json backtest_result.json
           fi
 
       - name: Save the verdict to the repository
