@@ -7,6 +7,11 @@ name: News backtest
 # Runs on the 1st of each month, and whenever it is started by hand from the
 # Actions tab. Reads public price and news data only; it never contacts
 # SafeBets.
+#
+# The news archive limits how often one address may ask, and GitHub's servers
+# share addresses, so some downloads are refused on any given run. Whatever
+# does arrive is saved in news_cache/ and reused, so coverage builds up over
+# runs. Starting this with scope "news" only tops up that saved news.
 
 on:
   schedule:
@@ -14,9 +19,9 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        description: "full = all 26 assets (about 1.5 hours), quick = 8 assets"
+        description: "full = all 26 assets, quick = 8 assets, news = only top up the saved news"
         type: choice
-        options: [full, quick]
+        options: [full, quick, news]
         default: full
 
 permissions:
@@ -42,18 +47,39 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-predict.txt
 
-      - name: Run the test
+      - name: Download news
         run: |
           if [ "${{ github.event.inputs.scope }}" = "quick" ]; then
-            python news_bakeoff.py --quick --refresh-news --json backtest_result.json
+            python news_bakeoff.py --quick --download-news --refresh-news --news-minutes 45
           else
-            python news_bakeoff.py --refresh-news --json backtest_result.json
+            python news_bakeoff.py --download-news --refresh-news --news-minutes 45
           fi
 
-      - name: Save the verdict to the repository
+      - name: Save the news to the repository
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -d news_cache ]; then git add news_cache; fi
+          if git diff --cached --quiet; then
+            echo "No new news to save."
+          else
+            git commit -m "Update saved news"
+            git pull --rebase
+            git push
+          fi
+
+      - name: Run the test
+        if: github.event.inputs.scope != 'news'
+        run: |
+          if [ "${{ github.event.inputs.scope }}" = "quick" ]; then
+            python news_bakeoff.py --quick --offline --json backtest_result.json
+          else
+            python news_bakeoff.py --offline --json backtest_result.json
+          fi
+
+      - name: Save the verdict to the repository
+        if: github.event.inputs.scope != 'news'
+        run: |
           git add backtest_result.json
           if git diff --cached --quiet; then
             echo "Verdict unchanged."
