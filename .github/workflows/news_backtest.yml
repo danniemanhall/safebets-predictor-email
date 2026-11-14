@@ -1,0 +1,64 @@
+name: News backtest
+
+# Tests whether a model that reads news and price history can beat typing the
+# tile price, scored on SafeBets' own bands and payouts. Saves the verdict to
+# backtest_result.json, which the daily predictions read.
+#
+# Runs on the 1st of each month, and whenever it is started by hand from the
+# Actions tab. Reads public price and news data only; it never contacts
+# SafeBets.
+
+on:
+  schedule:
+    - cron: "0 2 1 * *"
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: "full = all 26 assets (about 1.5 hours), quick = 8 assets"
+        type: choice
+        options: [full, quick]
+        default: full
+
+permissions:
+  contents: write
+
+concurrency:
+  group: news-backtest
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-predict.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-predict.txt
+
+      - name: Run the test
+        run: |
+          if [ "${{ github.event.inputs.scope }}" = "quick" ]; then
+            python news_bakeoff.py --quick --refresh-news --json backtest_result.json
+          else
+            python news_bakeoff.py --refresh-news --json backtest_result.json
+          fi
+
+      - name: Save the verdict to the repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backtest_result.json
+          if git diff --cached --quiet; then
+            echo "Verdict unchanged."
+          else
+            git commit -m "Update news backtest verdict"
+            git pull --rebase
+            git push
+          fi
