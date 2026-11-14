@@ -1,36 +1,43 @@
 {
-  "generated_at": "2026-11-14 13:09 UTC",
+  "generated_at": "2026-11-14 09:20 UTC",
   "data": "live",
   "assets": [
-    "AMZN"
+    "TSLA",
+    "AAPL",
+    "MSFT",
+    "META",
+    "NFLX",
+    "MU",
+    "AVGO",
+    "SILVER",
+    "WTI"
   ],
-  "assets_asked": 26,
   "settings": {
     "trees": 300,
     "test_days": 500,
     "refit": 63
   },
   "skip": [],
-  "predictions": 2000,
-  "tile_per_coin": 20.905,
+  "predictions": 18000,
+  "tile_per_coin": 34.504,
   "models": {
     "ens": {
       "label": "News + price ensemble",
-      "per_coin": 21.178,
-      "diff": 0.274,
+      "per_coin": 33.071,
+      "diff": -1.433,
       "months": 27,
-      "lo": -12.117,
-      "hi": 12.664,
+      "lo": -4.942,
+      "hi": 2.076,
       "both_halves": false,
       "won": false
     },
     "lin": {
       "label": "News-only linear",
-      "per_coin": 22.837,
-      "diff": 1.931,
+      "per_coin": 36.198,
+      "diff": 1.694,
       "months": 27,
-      "lo": -8.243,
-      "hi": 12.106,
+      "lo": -1.381,
+      "hi": 4.768,
       "both_halves": false,
       "won": false
     }

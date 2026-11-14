@@ -47,7 +47,7 @@ USAGE
   python news_bakeoff.py --synthetic noise  # control: news is pure noise
   python news_bakeoff.py --synthetic signal # control: news truly predicts price
   python news_bakeoff.py --json backtest_result.json   # also save the verdict
-  python news_bakeoff.py --download-news --refresh-news   # only top up the news
+  python news_bakeoff.py --download-news --max-age 7   # only top up the news
   python news_bakeoff.py --offline          # test on saved news, download nothing
 
 The saved verdict is what predict_daily.py reads to decide how to produce the
@@ -143,8 +143,7 @@ BUCKETS = [('quiet', 0.0, 0.8), ('normal', 0.8, 1.5), ('heavy', 1.5, np.inf)]
 
 GDELT_URL = 'https://api.gdeltproject.org/api/v2/doc/doc'
 CACHE_DIR = 'news_cache'
-MIN_GAP = 10.0           # seconds between requests; the archive asks for 5+
-COOL_DOWN = 45.0         # extra wait after the archive says to slow down
+MIN_GAP = 12.0           # seconds between requests; the archive asks for 5+
 _last_call = [0.0]
 
 
@@ -235,11 +234,14 @@ def download_news(symbols, budget_min: float = 40.0, max_age_days=None):
     are fetched; with a number, anything older than that is refreshed too.
 
     The archive limits how often one address may ask, and on shared servers
-    (GitHub's) that limit is often already used up by someone else. So this
-    works in rounds: one attempt per asset, a pause after every refusal, then
-    back round to the ones that were refused, until everything is in or the
-    time budget runs out. Whatever was saved earlier stays in place, so a bad
-    day costs freshness, not the whole test.
+    (GitHub's) that limit is usually already used up by someone else: on the
+    first two runs there, fewer than one request in five got through. A
+    request only succeeds in a gap when nobody at that address has asked for
+    a few seconds, so the way to get data is to keep asking steadily, never
+    faster than the archive's own limit, and take whatever lands. This works
+    in rounds, missing assets first and then the stalest, until everything is
+    in or the time budget runs out. Whatever was saved earlier stays in
+    place, so a bad day costs freshness, not the whole test.
 
     Returns the assets that could not be fetched this time.
     """
@@ -249,7 +251,9 @@ def download_news(symbols, budget_min: float = 40.0, max_age_days=None):
         age = news_age_days(sym)
         return age is None or (max_age_days is not None and age > max_age_days)
 
-    pending = [s for s in symbols if wanted(s)]
+    # Missing first, then the stalest.
+    pending = sorted((s for s in symbols if wanted(s)),
+                     key=lambda sym: -(news_age_days(sym) or 10 ** 6))
     if not pending:
         return []
     print(f'Downloading news for {len(pending)} assets '
@@ -271,12 +275,11 @@ def download_news(symbols, budget_min: float = 40.0, max_age_days=None):
                 news = _save_news(sym, got['timelinevolraw'], got['timelinetone'])
                 print(f'  {sym:8} saved {len(news)} days of news')
             except RateLimited:
-                still.append(sym)
-                time.sleep(max(0.0, min(COOL_DOWN, deadline - time.time())))
+                still.append(sym)          # _gdelt paces the next attempt
             except RuntimeError as exc:
                 print(f'  {sym:8} news search failed: {exc}')
         pending = still
-        if pending:
+        if pending and round_no % 5 == 0:
             print(f'  round {round_no}: {len(pending)} still waiting on the archive')
     if pending:
         print(f"  not downloaded this time: {', '.join(pending)}")
@@ -613,6 +616,11 @@ def main():
                     help='no downloads; made-up data with a known answer')
     ap.add_argument('--refresh-news', action='store_true',
                     help='also refresh saved news that is more than 2 days old')
+    ap.add_argument('--max-age', type=int, metavar='DAYS',
+                    help='also refresh saved news older than this many days')
+    ap.add_argument('--min-assets', type=int, default=1,
+                    help='do not run the test, or save a verdict, with fewer '
+                         'assets than this')
     ap.add_argument('--download-news', action='store_true',
                     help='download news into news_cache/ and stop')
     ap.add_argument('--offline', action='store_true',
@@ -647,8 +655,10 @@ def main():
     # ---- gather prices and news --------------------------------------
     ready = []
     if not args.synthetic and not args.offline:
+        max_age = args.max_age if args.max_age is not None else (
+            2 if args.refresh_news else None)
         download_news([sb for sb, _ in pairs], budget_min=args.news_minutes,
-                      max_age_days=2 if args.refresh_news else None)
+                      max_age_days=max_age)
     if args.download_news:
         saved = [sb for sb, _ in pairs if load_news(sb) is not None]
         print(f'News saved for {len(saved)} of {len(pairs)} assets.')
@@ -674,6 +684,11 @@ def main():
     if not ready:
         raise SystemExit('Nothing to test: no asset has both saved news and price '
                          'history. Run with --download-news first.')
+    if len(ready) < args.min_assets:
+        print(f'\nOnly {len(ready)} assets have saved news; {args.min_assets} are '
+              'needed for a verdict worth keeping. Test not run, and the '
+              'existing verdict is left as it is.')
+        return
 
     # ---- test 1 -------------------------------------------------------
     records = []
